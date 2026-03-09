@@ -1,0 +1,40 @@
+# Environment
+.env
+.streamlit/secrets.toml
+client_secret*.json
+.venv
+venv/
+env/
+
+# Vector store
+vectorstore/
+
+# Dados locais (SQLite, etc.)
+data/
+*.db
+*.sqlite
+
+# Documents (opcional - remova se quiser versionar)
+documents/*.pdf
+documents/*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Artefatos acidentais (pip, etc.)
+=*
+nul

@@ -1,0 +1,60 @@
+:root {
+  --primary-color: #0b3f6f;
+  --sidebar-bg: #0a2f52;
+}
+
+.bg-primary,
+button[type="submit"],
+button.bg-primary {
+  background-color: var(--primary-color) !important;
+  border-color: var(--primary-color) !important;
+}
+
+.text-primary {
+  color: var(--primary-color) !important;
+}
+
+aside,
+[data-testid="sidebar"],
+.sidebar {
+  background: var(--sidebar-bg) !important;
+}
+
+/* Força textos da sidebar em branco */
+aside,
+aside *,
+[data-testid="sidebar"],
+[data-testid="sidebar"] * {
+  color: #ffffff !important;
+}
+
+aside input::placeholder,
+[data-testid="sidebar"] input::placeholder {
+  color: rgba(255, 255, 255, 0.75) !important;
+}
+
+/* Brand no topo da sidebar: substitui texto/icone padrão pela logo da empresa */
+aside a[href="/"] {
+  position: relative !important;
+  min-height: 30px !important;
+  font-size: 0 !important;
+  line-height: 0 !important;
+  color: transparent !important;
+}
+
+aside a[href="/"] * {
+  color: transparent !important;
+  font-size: 0 !important;
+}
+
+aside a[href="/"] svg {
+  display: none !important;
+}
+
+aside a[href="/"]::before {
+  content: "" !important;
+  display: block !important;
+  width: 160px !important;
+  height: 28px !important;
+  background: url("/static/logo.png") left center / contain no-repeat !important;
+}

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>Admin - CD2 RAG</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/admin.css" />
+</head>
+<body>
+  <div class="admin-app">
+    <header class="admin-header">
+      <a href="/ui" class="admin-back">← Voltar ao Chat</a>
+      <h1>Painel Admin</h1>
+      <p class="admin-sub">Upload e gestão de documentos</p>
+    </header>
+
+    <section class="admin-section">
+      <h2>Upload de documento</h2>
+      <form id="upload-form" class="upload-form">
+        <input type="file" id="file-input" accept=".txt,.pdf,.md,.docx" required />
+        <button type="submit" id="upload-btn" class="btn-primary">Enviar</button>
+      </form>
+      <p class="hint">Formatos: .txt, .pdf, .md, .docx</p>
+      <div id="upload-status" class="upload-status"></div>
+    </section>
+
+    <section id="admin-settings-section" class="admin-section">
+      <h2>Instruções do assistente</h2>
+      <p class="hint">Instruções customizadas para o RAG (deixe vazio para usar o padrão).</p>
+      <textarea id="settings-instructions" class="settings-textarea" rows="6" placeholder="Ex.: Responda objetivamente com contexto técnico quando relevante. Não cite arquivo-base .txt; cite o caminho técnico real quando ele for a resposta."></textarea>
+      <button type="button" id="settings-save-btn" class="btn-primary" style="margin-top:8px">Salvar instruções</button>
+      <div id="settings-status" class="upload-status"></div>
+    </section>
+
+    <section id="admin-sync-section" class="admin-section">
+      <h2>Sincronizar</h2>
+      <p class="hint">Processar arquivos do diretório ./data (txt, pdf, md, docx).</p>
+      <button type="button" id="sync-btn" class="btn-primary">Processar/Sincronizar</button>
+      <div id="sync-status" class="upload-status"></div>
+    </section>
+
+    <section class="admin-section">
+      <h2>Documentos indexados</h2>
+      <div id="documents-loading" class="hint">Carregando...</div>
+      <div id="documents-list" class="documents-list"></div>
+      <div id="documents-empty" class="hint" style="display:none">Nenhum documento.</div>
+    </section>
+  </div>
+
+  <script src="/static/js/admin.js"></script>
+</body>
+</html>
