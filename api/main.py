@@ -111,7 +111,7 @@ class OpenAIChatCompletionRequest(BaseModel):
     model: Optional[str] = None
     messages: List[OpenAIChatMessage]
     temperature: float = 0.4
-    max_tokens: int = 512
+    max_tokens: int = 4096
     stream: bool = False
 
 
@@ -671,6 +671,7 @@ async def _run_rag_flow(
     query: str,
     limit: int = 5,
     temperature: float = 0.7,
+    max_tokens: int = 4096,
 ):
     """
     Fluxo RAG reutilizável: busca vetorial + geração de resposta.
@@ -707,6 +708,7 @@ async def _run_rag_flow(
         query=query,
         context=context,
         temperature=temperature,
+        max_tokens=max_tokens,
         system_instructions=system_instructions,
     )
     return answer, sources
@@ -821,7 +823,7 @@ async def openai_chat_completions(
                 query=query,
                 context=context,
                 temperature=min(body.temperature, 0.4),
-                max_tokens=body.max_tokens,
+                max_tokens=max(body.max_tokens, 4096),
                 system_instructions=system_instructions,
                 completion_id=completion_id,
             ):
@@ -845,6 +847,7 @@ async def openai_chat_completions(
         query=query,
         limit=5,
         temperature=min(body.temperature, 0.4),
+        max_tokens=max(body.max_tokens, 4096),
     )
     return {
         "id": completion_id,
