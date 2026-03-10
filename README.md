@@ -12,7 +12,7 @@ Plataforma de RAG (Retrieval Augmented Generation) containerizada com Docker Com
 - [Como Executar](#como-executar)
 - [Testando a API](#testando-a-api)
 - [Exemplos de Uso](#exemplos-de-uso)
-- [Interfaces Web](#interfaces-web)
+- [Interfaces](#interfaces)
 - [Escalabilidade](#escalabilidade)
 - [Configurações Avançadas](#configurações-avançadas)
 - [Troubleshooting](#troubleshooting)
@@ -108,7 +108,6 @@ similaridade = cos(θ) = (A · B) / (||A|| × ||B||)
 │   ├── embeddings_service.py
 │   ├── rag_service.py
 │   ├── document_service.py
-│   ├── static/             # UI minimalista
 │   ├── requirements.txt
 │   └── Dockerfile
 │
@@ -134,10 +133,9 @@ similaridade = cos(θ) = (A · B) / (||A|| × ||B||)
 │   └── test_api.sh*
 │
 ├── docs/                   # Documentação adicional
-│   ├── AUDITORIA_FRONTEND.md
 │   ├── ESCALABILIDADE_E_PRODUCAO.md
 │   ├── OAUTH_REDIRECT_URI.md
-│   └── PLANO_COMPLETO_FRONTEND_E_RAG.md
+│   └── (outros documentos técnicos)
 │
 ├── embeddings/             # Módulo de embeddings (referência)
 │   └── __init__.py
@@ -354,9 +352,10 @@ cp documento.txt ./data/
 docker compose logs -f ingestion
 ```
 
-## Interfaces Web
+## Interfaces
 
 -   **API Swagger**: http://localhost:8000/docs
+-   **Open WebUI**: http://localhost:3000
 -   **MinIO Console**: http://localhost:9001 (usuário: minioadmin, senha: minioadmin)
 
 ## 📈 Escalabilidade
@@ -386,9 +385,9 @@ api:
 
 #### 4. Provedor de LLM (Groq/Gemini)
 
--   **Failover por provedor**: Definir estratégia de fallback entre Groq e Gemini
--   **Controle de custos**: Ajustar modelo/temperatura por tipo de requisição
--   **Rate limit por chave**: Monitorar cotas e limites de API
+-   **Múltiplas Chaves Groq (Round Robin)**: O RAG agora suporta nativamente o uso de múltiplas contas do Groq no plano **Free**. Basta separar as chaves por vírgula na variável de ambiente. A API irá circular entre elas (load balancing local), driblando Erros 429 de Rate Limit (TPM).
+-   **Failover por provedor**: Definir estratégia de fallback estrutural entre Groq primário e Gemini secundário.
+-   **Controle de custos**: Ajustar o modelo/temperatura por tipo de requisição (uso de llama-3.1-8b).
 
 ### Otimizações
 
@@ -453,8 +452,9 @@ MINIO_ROOT_USER=minioadmin
 MINIO_ROOT_PASSWORD=minioadmin
 MINIO_BUCKET=documents
 
-# LLM Providers
-GROQ_API_KEY=
+# LLM Providers (Groq Cloud / Gemini)
+# Você pode utilizar múltiplas chaves gratuitas separadas por vírgula para ativar o algoritmo Round-Robin e escalar horizontalmente os limites de TPM.
+GROQ_API_KEY=gsk_chave1,gsk_chave2,gsk_chave3
 GOOGLE_API_KEY=
 
 # Embeddings
