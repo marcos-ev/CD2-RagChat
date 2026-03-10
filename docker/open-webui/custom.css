@@ -1,60 +1,105 @@
 :root {
-  --primary-color: #0b3f6f;
-  --sidebar-bg: #0a2f52;
+    --primary-color: #0b3f6f;
 }
 
 .bg-primary,
 button[type="submit"],
 button.bg-primary {
-  background-color: var(--primary-color) !important;
-  border-color: var(--primary-color) !important;
+    background-color: var(--primary-color) !important;
+    border-color: var(--primary-color) !important;
 }
 
 .text-primary {
-  color: var(--primary-color) !important;
+    color: var(--primary-color) !important;
 }
 
-aside,
-[data-testid="sidebar"],
-.sidebar {
-  background: var(--sidebar-bg) !important;
+/* =========================================
+   SUBSTITUIÇÃO DA LOGO NO OPEN WEBUI
+   ========================================= */
+
+/* Oculta o link do ícone pequeno (favicon) — 1º filho do header sticky */
+div.sidebar > a:first-child {
+    display: none !important;
 }
 
-/* Força textos da sidebar em branco */
-aside,
-aside *,
-[data-testid="sidebar"],
-[data-testid="sidebar"] * {
-  color: #ffffff !important;
+/* DARK MODE: ícone retráido — substitui a imagem do favicon pelo ícone dark */
+html.dark img.sidebar-new-chat-icon {
+    content: url("/static/logo-dark.png") !important;
 }
 
-aside input::placeholder,
-[data-testid="sidebar"] input::placeholder {
-  color: rgba(255, 255, 255, 0.75) !important;
+/* Aplica o logo customizado ao link do WEBUI_NAME — 2º filho do header sticky */
+div.sidebar > a:nth-child(2) {
+    display: block !important;
+    width: 160px !important;
+    height: 44px !important;
+    background: url("/static/logo.png") left center / contain no-repeat !important;
+    flex: none !important;
+    text-decoration: none !important;
 }
 
-/* Brand no topo da sidebar: substitui texto/icone padrão pela logo da empresa */
-aside a[href="/"] {
-  position: relative !important;
-  min-height: 30px !important;
-  font-size: 0 !important;
-  line-height: 0 !important;
-  color: transparent !important;
+/* DARK MODE: logo completa (sidebar expandida) */
+html.dark div.sidebar > a:nth-child(2) {
+    background: url("/static/logo-dark-full.png") left center / contain no-repeat !important;
 }
 
-aside a[href="/"] * {
-  color: transparent !important;
-  font-size: 0 !important;
+/* Oculta o texto/filhos dentro do link de nome */
+div.sidebar > a:nth-child(2) * {
+    display: none !important;
 }
 
-aside a[href="/"] svg {
-  display: none !important;
+/* Tela de login */
+.auth-form a[href="/"] *,
+form a[href="/"] * {
+    display: none !important;
 }
 
-aside a[href="/"]::before {
-  content: "" !important;
-  display: block !important;
-  width: 160px !important;
-  height: 28px !important;
-  background: url("/static/logo.png") left center / contain no-repeat !important;
+.auth-form a[href="/"],
+form a[href="/"] {
+    display: block !important;
+    width: 200px !important;
+    height: 60px !important;
+    margin: 0 auto !important;
+    background: url("/static/logo.png") center center / contain no-repeat !important;
+}
+
+/* DARK MODE: logo completa na tela de login */
+html.dark .auth-form a[href="/"],
+html.dark form a[href="/"] {
+    background: url("/static/logo-dark-full.png") center center / contain no-repeat !important;
+}
+
+/* =========================================
+   MENSAGEM DE BOAS-VINDAS NO CHAT VAZIO
+   Substitui o nome do modelo pelo texto customizado.
+   Seletor confirmado via inspeção DOM real:
+   div.text-gray-800.text-center span.line-clamp-1
+   ========================================= */
+
+/* Esconde o texto dinâmico do nome do modelo */
+div.text-gray-800.text-center span.line-clamp-1 {
+    font-size: 0 !important;
+    color: transparent !important;
+}
+
+/* Injeta o texto de boas-vindas no lugar */
+div.text-gray-800.text-center span.line-clamp-1::before {
+    content: "Bem vindo ao Assistente CD2";
+    font-size: 1.875rem;
+    color: #1f2937;
+    font-weight: 500;
+    display: inline;
+}
+
+html.dark div.text-gray-800.text-center span.line-clamp-1::before {
+    color: #f3f4f6;
+}
+
+/* Substitui o ícone do modelo pelo logo CD2 no modo dark */
+html.dark div.text-gray-800.text-center img.rounded-full {
+    content: url("/static/logo-dark.png") !important;
+    border-radius: 0 !important;
+    border: none !important;
+    width: 2.5rem !important;
+    height: 2.5rem !important;
+    object-fit: contain !important;
 }

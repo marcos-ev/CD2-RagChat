@@ -29,4 +29,4 @@ docker exec rag-ollama ollama pull llama3.2
 Write-Host ""
 Write-Host "=== Concluido ===" -ForegroundColor Green
 Write-Host "API: http://localhost:8000" -ForegroundColor White
-Write-Host "UI:  http://localhost:8000/ui" -ForegroundColor White
+Write-Host "Open WebUI: http://localhost:3000" -ForegroundColor White
