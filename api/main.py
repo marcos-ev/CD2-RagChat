@@ -8,8 +8,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request, 
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import os
@@ -55,9 +54,8 @@ async def lifespan(app: FastAPI):
     pass
 
 
-# Caminho base para arquivos estáticos (UI minimalista)
+# Caminho base da API
 BASE_DIR = Path(__file__).resolve().parent
-STATIC_DIR = BASE_DIR / "static"
 
 
 # Rate limiting
@@ -76,10 +74,6 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Session/cookie para manter usuário logado (OAuth)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax")
-
-# Servir arquivos estáticos (imagens, etc.)
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
 
 # Modelos Pydantic
 class SearchRequest(BaseModel):
@@ -118,6 +112,7 @@ class OpenAIChatCompletionRequest(BaseModel):
     messages: List[OpenAIChatMessage]
     temperature: float = 0.7
     max_tokens: int = 512
+    stream: bool = False
 
 
 def _strip_accents(text: str) -> str:
@@ -277,7 +272,7 @@ class ConversationReorderRequest(BaseModel):
     order: List[int]
 
 
-# --- Rotas públicas (sem auth): /, /ui, /health, /login, /auth/callback, /logout ---
+# --- Rotas públicas (sem auth): /, /health, /login, /auth/callback, /logout ---
 
 # Endpoints
 ALLOW_ANONYMOUS = os.getenv("ALLOW_ANONYMOUS_CHAT", "false").strip().lower() in ("true", "1", "yes")
@@ -310,29 +305,6 @@ async def root():
     }
 
 
-@app.get("/ui", response_class=HTMLResponse)
-async def ui():
-    """
-    Interface gráfica minimalista:
-    - Chat baseado em /rag
-    - Upload de arquivos via /upload
-    - Lista de documentos via /documents
-    """
-    index_path = STATIC_DIR / "index.html"
-    if not index_path.exists():
-        raise HTTPException(status_code=404, detail="UI não encontrada")
-    return FileResponse(index_path)
-
-
-@app.get("/admin", response_class=HTMLResponse)
-async def admin_ui():
-    """Painel admin: upload e gestão de documentos (auth no frontend)."""
-    admin_path = STATIC_DIR / "admin.html"
-    if not admin_path.exists():
-        raise HTTPException(status_code=404, detail="Admin não encontrado")
-    return FileResponse(admin_path)
-
-
 @app.get("/login")
 async def login(request: Request):
     """Redireciona para Google OAuth. Público."""
@@ -362,7 +334,7 @@ async def auth_callback(request: Request, db=Depends(get_db)):
     role = _get_role_from_env(email)
     user = create_or_update_user_from_google(db, email, name, role)
     request.session["user"] = user_to_session_dict(user)
-    return RedirectResponse(url="/ui", status_code=303)
+    return RedirectResponse(url="/", status_code=303)
 
 
 @app.get("/logout")
@@ -697,7 +669,7 @@ async def _run_rag_flow(
     qdrant_service,
     db,
     query: str,
-    limit: int = 3,
+    limit: int = 5,
     temperature: float = 0.7,
 ):
     """
@@ -710,7 +682,7 @@ async def _run_rag_flow(
         qdrant_service=qdrant_service,
         query=query,
         limit=limit,
-        threshold=0.0,
+        threshold=0.3,
     )
     sources = []
     context_parts = []
@@ -725,7 +697,7 @@ async def _run_rag_flow(
                 metadata=doc.extra_metadata if doc.extra_metadata else {},
             )
         )
-        context_parts.append(f"Documento: {doc.filename}\nConteúdo: {safe_content}")
+        context_parts.append(safe_content)
 
     context = "\n\n---\n\n".join(context_parts)
     if not sources:
@@ -821,6 +793,46 @@ async def openai_chat_completions(
     if not user_messages:
         raise HTTPException(status_code=400, detail="messages deve conter ao menos uma mensagem de usuário")
     query = user_messages[-1]
+
+    # Recuperar contexto RAG (sempre síncrono — rápido, ~200ms)
+    ordered_docs = await _semantic_search_documents(
+        db=db,
+        embeddings_service=app.state.embeddings_service,
+        qdrant_service=app.state.qdrant_service,
+        query=query,
+        limit=3,
+        threshold=0.3,
+    )
+    context_parts = [_redact_secrets(doc.content or "") for doc, _ in ordered_docs[:3]]
+    context = "\n\n---\n\n".join(context_parts)
+    system_instructions = get_app_setting(db, "rag_instructions", "").strip() or None
+
+    model_name = body.model or os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    completion_id = f"chatcmpl-{int(time.time() * 1000)}"
+
+    # Streaming (padrão do Open WebUI)
+    if body.stream:
+        async def _event_generator():
+            async for chunk in app.state.rag_service.generate_response_stream(
+                query=query,
+                context=context,
+                temperature=body.temperature,
+                max_tokens=body.max_tokens,
+                system_instructions=system_instructions,
+                completion_id=completion_id,
+            ):
+                yield chunk
+
+        return StreamingResponse(
+            _event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # Não-streaming (fallback)
     answer, _ = await _run_rag_flow(
         app.state.embeddings_service,
         app.state.rag_service,
@@ -831,10 +843,10 @@ async def openai_chat_completions(
         temperature=body.temperature,
     )
     return {
-        "id": f"chatcmpl-{int(time.time() * 1000)}",
+        "id": completion_id,
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": body.model or os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
+        "model": model_name,
         "choices": [
             {
                 "index": 0,
@@ -1120,39 +1132,68 @@ async def update_admin_settings(
 DATA_DIR = os.getenv("DATA_DIR", str(Path(BASE_DIR).parent / "data"))
 
 
+def _sync_files_from_dir(data_path, db, doc_service, emb_service, qdrant_service):
+    """Lógica compartilhada de sync: retorna (arquivos_para_processar, skipped)."""
+    from pathlib import Path
+    storage_path = Path(data_path) / "storage"
+    allowed_ext = {".txt", ".pdf", ".md", ".docx"}
+
+    # Nomes já indexados (sem duplicar)
+    existing = {
+        row[0]
+        for row in db.query(Document.filename)
+        .filter(Document.parent_doc_id.is_(None))
+        .all()
+    }
+
+    files_to_process = []
+    skipped = 0
+    for f in Path(data_path).rglob("*"):
+        # Ignorar pasta storage/ (cópias internas já indexadas)
+        if storage_path in f.parents or f == storage_path:
+            continue
+        if not f.is_file() or f.suffix.lower() not in allowed_ext:
+            continue
+        if f.name in existing:
+            skipped += 1
+            continue
+        files_to_process.append(f)
+    return files_to_process, skipped
+
+
 @app.post("/admin/sync")
 async def admin_sync_documents(
     db=Depends(get_db),
     current_user: User = Depends(require_role(["admin"])),
 ):
-    """Processa/sincroniza arquivos do diretório DATA_DIR. Apenas admin."""
+    """Processa apenas arquivos novos do DATA_DIR (ignora já indexados). Apenas admin."""
     from pathlib import Path
-    allowed_ext = {".txt", ".pdf", ".md", ".docx"}
     data_path = Path(DATA_DIR)
     if not data_path.exists() or not data_path.is_dir():
         return {"message": "Diretório não encontrado", "path": str(data_path), "processed": 0}
+
+    files_to_process, skipped = _sync_files_from_dir(
+        data_path, db, app.state.document_service, app.state.embeddings_service, app.state.qdrant_service
+    )
     processed = 0
     errors = []
-    doc_service = app.state.document_service
-    emb_service = app.state.embeddings_service
-    for f in data_path.rglob("*"):
-        if not f.is_file() or f.suffix.lower() not in allowed_ext:
-            continue
+    for f in files_to_process:
         try:
             content = f.read_bytes()
-            await doc_service.process_document(
+            await app.state.document_service.process_document(
                 filename=f.name,
                 content=content,
                 db=db,
-                embeddings_service=emb_service,
+                embeddings_service=app.state.embeddings_service,
                 qdrant_service=app.state.qdrant_service,
             )
             processed += 1
         except Exception as e:
             errors.append(f"{f.name}: {str(e)}")
     return {
-        "message": f"Sincronização concluída: {processed} arquivo(s) processado(s)",
+        "message": f"Sincronização concluída: {processed} novo(s) processado(s), {skipped} já existente(s) ignorado(s).",
         "processed": processed,
+        "skipped": skipped,
         "errors": errors[:10],
     }
 
@@ -1162,36 +1203,36 @@ async def internal_sync_documents(
     request: Request,
     db=Depends(get_db),
 ):
-    """Processa arquivos de DATA_DIR. Sem auth; apenas rede interna (ingestion/Docker)."""
+    """Processa apenas arquivos novos do DATA_DIR. Sem auth; apenas rede interna (ingestion/Docker)."""
     if not _is_internal_request(request):
         raise HTTPException(status_code=403, detail="Acesso negado: endpoint apenas para rede interna")
     from pathlib import Path
-    allowed_ext = {".txt", ".pdf", ".md", ".docx"}
     data_path = Path(DATA_DIR)
     if not data_path.exists() or not data_path.is_dir():
         return {"message": "Diretório não encontrado", "path": str(data_path), "processed": 0}
+
+    files_to_process, skipped = _sync_files_from_dir(
+        data_path, db, app.state.document_service, app.state.embeddings_service, app.state.qdrant_service
+    )
     processed = 0
     errors = []
-    doc_service = app.state.document_service
-    emb_service = app.state.embeddings_service
-    for f in data_path.rglob("*"):
-        if not f.is_file() or f.suffix.lower() not in allowed_ext:
-            continue
+    for f in files_to_process:
         try:
             content = f.read_bytes()
-            await doc_service.process_document(
+            await app.state.document_service.process_document(
                 filename=f.name,
                 content=content,
                 db=db,
-                embeddings_service=emb_service,
+                embeddings_service=app.state.embeddings_service,
                 qdrant_service=app.state.qdrant_service,
             )
             processed += 1
         except Exception as e:
             errors.append(f"{f.name}: {str(e)}")
     return {
-        "message": f"Sincronização concluída: {processed} arquivo(s) processado(s)",
+        "message": f"Sincronização concluída: {processed} novo(s) processado(s), {skipped} já existente(s) ignorado(s).",
         "processed": processed,
+        "skipped": skipped,
         "errors": errors[:10],
     }
 

@@ -4,10 +4,13 @@ Serviço para processamento de documentos com chunking
 
 import os
 import uuid
+import logging
 import numpy as np
 import asyncio
 from datetime import datetime
 from typing import Dict, Any, List
+
+logger = logging.getLogger(__name__)
 from sqlalchemy.orm import Session
 
 from embeddings_service import EmbeddingsService
@@ -21,7 +24,7 @@ STORAGE_DIR = os.getenv("STORAGE_DIR", os.path.join(DATA_DIR, "storage"))
 # Documentos com menos tokens são tratados como 1 chunk único
 MIN_TOKENS_FOR_CHUNKING = int(os.getenv("MIN_TOKENS_FOR_CHUNKING", "500"))
 CHARS_PER_TOKEN = 4  # Aproximação: ~1 token = 4 caracteres
-EMBEDDINGS_TIMEOUT_SECONDS = float(os.getenv("EMBEDDINGS_TIMEOUT_SECONDS", "20"))
+EMBEDDINGS_TIMEOUT_SECONDS = float(os.getenv("EMBEDDINGS_TIMEOUT_SECONDS", "300"))
 
 
 class DocumentService:
@@ -114,16 +117,44 @@ class DocumentService:
             chunk_texts = [text_content.strip() or "(conteúdo vazio)"]
 
         # Gerar embeddings em batch (mais eficiente).
-        # Se o provedor de embeddings estiver indisponível no momento,
-        # ainda indexamos o conteúdo com vetor neutro para manter busca textual funcional.
+        # ATENÇÃO: não usamos fallback de zeros — vetor inválido quebra a busca semântica.
+        # Se o modelo falhar, o upload é rejeitado com erro claro para o cliente.
         try:
             embeddings = await asyncio.wait_for(
                 asyncio.to_thread(embeddings_service.generate_embeddings_batch, chunk_texts),
                 timeout=EMBEDDINGS_TIMEOUT_SECONDS,
             )
-        except Exception:
-            fallback_dim = int(os.getenv("EMBEDDING_DIM_FALLBACK", "768"))
-            embeddings = np.zeros((len(chunk_texts), fallback_dim), dtype=float)
+        except asyncio.TimeoutError as exc:
+            logger.error(
+                "Timeout ao gerar embeddings para '%s' (limite: %ss)",
+                filename, EMBEDDINGS_TIMEOUT_SECONDS,
+            )
+            raise RuntimeError(
+                f"Timeout ao gerar embeddings para '{filename}' "
+                f"(limite: {EMBEDDINGS_TIMEOUT_SECONDS}s). "
+                "O modelo pode estar carregando; tente novamente em alguns segundos."
+            ) from exc
+        except Exception as exc:
+            logger.error(
+                "Falha ao gerar embeddings para '%s': %s",
+                filename, exc, exc_info=True,
+            )
+            raise RuntimeError(
+                f"Falha ao gerar embeddings para '{filename}': {exc}"
+            ) from exc
+
+        # Validar que nenhum vetor retornou zerado
+        norms = np.linalg.norm(embeddings, axis=1)
+        zero_count = int(np.sum(norms == 0))
+        if zero_count > 0:
+            logger.error(
+                "Embeddings inválidos (vetor zero) para '%s': %d/%d chunks",
+                filename, zero_count, len(chunk_texts),
+            )
+            raise RuntimeError(
+                f"{zero_count} chunks de '{filename}' retornaram vetor zero. "
+                "Verifique o serviço de embeddings."
+            )
 
         # Preparar metadados base
         metadata_base = {

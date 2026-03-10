@@ -9,7 +9,11 @@ Ordem de fallback:
 import httpx
 import os
 import re
+import asyncio
+import logging
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 # Constantes dos provedores
@@ -32,45 +36,48 @@ class RAGService:
         query: str,
         context: str,
         temperature: float = 0.7,
-        max_tokens: int = 512,
+        max_tokens: int = 1024,
         system_instructions: Optional[str] = None,
     ) -> str:
         """
         Gerar resposta usando RAG com cascata de provedores.
-
-        Ordem: Groq -> Gemini
-
-        Args:
-            query: Pergunta do usuário
-            context: Contexto retornado pela busca semântica
-            temperature: Temperatura para geração (0.0-1.0)
-            max_tokens: Número máximo de tokens na resposta
-            system_instructions: Instruções customizadas (opcional)
+        Ordem: Groq (com retry em 429) -> Gemini
 
         Returns:
-            Resposta gerada pelo LLM
+            Resposta gerada pelo LLM, ou mensagem amigável se todos falharem.
         """
         prompt = self._build_rag_prompt(query, context, system_instructions)
 
-        # 1) Tentar Groq (pula se GROQ_API_KEY não configurada)
+        # 1) Tentar Groq — com 1 retry em caso de rate limit (429)
         if os.getenv("GROQ_API_KEY"):
-            try:
-                raw = await self._call_groq(prompt, temperature, max_tokens)
-                return self._postprocess_answer(raw)
-            except Exception:
-                pass
+            for attempt in range(2):
+                try:
+                    raw = await self._call_groq(prompt, temperature, max_tokens)
+                    return self._postprocess_answer(raw)
+                except Exception as exc:
+                    err = str(exc)
+                    if "429" in err and attempt == 0:
+                        logger.warning("Groq rate limit (429). Aguardando 3s antes de retry...")
+                        await asyncio.sleep(3)
+                        continue
+                    logger.warning("Groq falhou (tentativa %d): %s", attempt + 1, exc)
+                    break
 
-        # 2) Tentar Gemini (pula se GOOGLE_API_KEY/GEMINI_API_KEY não configuradas)
+        # 2) Tentar Gemini
         if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
             try:
                 raw = await self._call_gemini(prompt, temperature, max_tokens)
                 return self._postprocess_answer(raw)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Gemini falhou: %s", exc)
 
-        raise Exception(
-            "Nenhum provedor LLM disponível: configure GROQ_API_KEY ou GOOGLE_API_KEY/GEMINI_API_KEY."
+        # Todos os provedores falharam — retornar mensagem amigável em vez de 500
+        logger.error("Nenhum provedor LLM disponível para responder a query.")
+        return (
+            "Desculpe, o serviço de respostas está temporariamente sobrecarregado. "
+            "Por favor, aguarde alguns segundos e tente novamente."
         )
+
 
     def _postprocess_answer(self, answer: str) -> str:
         """
@@ -178,6 +185,106 @@ Título:"""
             return content.strip()
         raise Exception("Groq: resposta vazia")
 
+    async def generate_response_stream(
+        self,
+        query: str,
+        context: str,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        system_instructions: Optional[str] = None,
+        completion_id: str = "",
+    ):
+        """
+        Gera resposta em streaming (Server-Sent Events, formato OpenAI).
+        Tenta Groq stream primeiro; se falhar, faz pseudo-stream da resposta completa.
+
+        Yields: bytes de cada chunk SSE
+        """
+        import json as _json
+        import time as _time
+
+        cid = completion_id or f"chatcmpl-{int(_time.time() * 1000)}"
+        model = self.groq_model
+        created = int(_time.time())
+
+        def _make_chunk(content: str, finish_reason=None) -> bytes:
+            delta = {"content": content} if content else {}
+            chunk = {
+                "id": cid,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+            }
+            return f"data: {_json.dumps(chunk)}\n\n".encode()
+
+        prompt = self._build_rag_prompt(query, context, system_instructions)
+        api_key = os.getenv("GROQ_API_KEY")
+        streamed_ok = False
+
+        if api_key:
+            for attempt in range(2):
+                try:
+                    async with self.client.stream(
+                        "POST",
+                        f"{GROQ_BASE_URL}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": self.groq_model,
+                            "messages": [{"role": "user", "content": prompt}],
+                            "temperature": temperature,
+                            "max_tokens": max_tokens,
+                            "stream": True,
+                        },
+                    ) as resp:
+                        if resp.status_code == 429:
+                            if attempt == 0:
+                                logger.warning("Groq 429 no stream. Retry em 3s...")
+                                await asyncio.sleep(3)
+                                continue
+                            break
+                        resp.raise_for_status()
+                        async for line in resp.aiter_lines():
+                            if not line or not line.startswith("data:"):
+                                continue
+                            raw = line[len("data:"):].strip()
+                            if raw == "[DONE]":
+                                break
+                            try:
+                                obj = _json.loads(raw)
+                                delta = obj["choices"][0].get("delta", {})
+                                text = delta.get("content", "")
+                                if text:
+                                    yield _make_chunk(text)
+                            except Exception:
+                                continue
+                        streamed_ok = True
+                        break
+                except Exception as exc:
+                    logger.warning("Groq stream falhou (tentativa %d): %s", attempt + 1, exc)
+                    if attempt == 0:
+                        await asyncio.sleep(3)
+
+        if not streamed_ok:
+            # Fallback: gerar resposta completa e pseudo-streamear
+            full = await self.generate_response(
+                query, context, temperature, max_tokens, system_instructions
+            )
+            # Enviar em pedaços de ~4 chars para simular typewriter
+            chunk_size = 4
+            for i in range(0, len(full), chunk_size):
+                yield _make_chunk(full[i: i + chunk_size])
+                await asyncio.sleep(0.01)
+
+        # Chunk final com finish_reason
+        yield _make_chunk("", finish_reason="stop")
+        yield b"data: [DONE]\n\n"
+
+
+
     async def _call_gemini(
         self, prompt: str, temperature: float, max_tokens: int
     ) -> str:
@@ -231,12 +338,12 @@ Título:"""
         """
         default_instructions = """- Responda a pergunta usando APENAS as informações do contexto fornecido
 - Se a resposta não estiver no contexto, diga que não tem informações suficientes
-- Seja objetivo, mas com contexto técnico suficiente quando a pergunta pedir detalhe
-- Dê a resposta direta primeiro; depois complemente apenas o que for relevante
+- Escreva uma resposta única, fluida e completa. NÃO separe em seções como "Resposta Direta", "Complementação", "Resumo" etc.
+- Responda como se fosse um colega explicando o assunto de forma clara e objetiva, com contexto técnico suficiente
 - Não invente etapas, nomes de times, ambientes, comandos, URLs ou procedimentos que não estejam no contexto
 - Em respostas em formato de processo/lista, pare no último passo confirmado pelo contexto; não adicione um "próximo passo padrão" só para completar
 - Se houver lacuna em parte crítica, declare brevemente que faltam informações para esse trecho, sem criar conteúdo hipotético
-- NÃO cite o nome do arquivo textual base de ingestão como fonte (ex: arquivos .txt da pasta de dados)
+- NÃO cite nomes de arquivos da base de conhecimento (ex: .txt, .pdf, .docx). O usuário não precisa saber de onde veio a informação
 - Quando houver no contexto o caminho técnico real do alvo da pergunta, pode citá-lo explicitamente na resposta (ex: src/infra/http/controllers/journey-passai-responses/PassaiCard.json)
 - Se a pergunta for sobre implementação, pode incluir um bloco curto de código relevante
 - Nunca escreva "não especificado" ou similar; se não tiver a informação, omita aquele ponto
