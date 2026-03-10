@@ -794,12 +794,16 @@ async def openai_chat_completions(
         raise HTTPException(status_code=400, detail="messages deve conter ao menos uma mensagem de usuário")
     query = user_messages[-1]
 
-    # Recuperar contexto RAG (sempre síncrono — rápido, ~200ms)
+    # Tratar histórico para perguntas de follow-up
+    history_dicts = [{"role": m.role, "content": m.content} for m in body.messages if m.content]
+    search_query = await app.state.rag_service.rewrite_query(history_dicts, query)
+    
+    # Recuperar contexto RAG usando a pergunta reescrita (caso seja follow-up)
     ordered_docs = await _semantic_search_documents(
         db=db,
         embeddings_service=app.state.embeddings_service,
         qdrant_service=app.state.qdrant_service,
-        query=query,
+        query=search_query,
         limit=5,
         threshold=0.25,
     )

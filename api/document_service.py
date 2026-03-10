@@ -249,7 +249,12 @@ class DocumentService:
                 text = ""
                 for page in pdf_reader.pages:
                     text += page.extract_text() + "\n"
-                return text
+                
+                # Cleanup PyPDF2 artifacts (spaces and newlines between words)
+                import re
+                text = re.sub(r'\n[ \t]*\n?', ' ', text)
+                text = re.sub(r' +', ' ', text)
+                return text.strip()
             except ImportError:
                 return "PDF requer PyPDF2. Instale com: pip install PyPDF2"
             except Exception as e:

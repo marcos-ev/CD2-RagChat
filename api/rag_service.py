@@ -151,6 +151,47 @@ Título:"""
         # Fallback heurístico
         return _normalize_title(text)
 
+    async def rewrite_query(self, history: list[dict], query: str) -> str:
+        """
+        Reescreve uma pergunta de follow-up (ex: 'e essas duas?') para ser 
+        autocontida usando o histórico da conversa.
+        Se a pergunta já for independente ou não houver histórico, retorna a original.
+        """
+        if not history or len(history) < 2:
+            return query
+            
+        # Pega as últimas 3 mensagens para dar contexto (sem sobrecarregar)
+        recent = history[-3:]
+        chat_log = "\n".join([f"{msg.get('role', 'user').upper()}: {msg.get('content', '')}" for msg in recent])
+        
+        prompt = f"""Dada a conversa abaixo e a pergunta de acompanhamento final, reescreva a pergunta de acompanhamento para que ela seja uma pergunta isolada e auto-explicativa, incluindo os sujeitos ocultos (como nomes de sistemas, projetos ou entidades mencionadas antes).
+Se a pergunta final já for clara e não depender do histórico, apenas repita-a. 
+NÃO responda a pergunta, apenas REESCREVA a pergunta.
+
+CONVERSA:
+{chat_log}
+
+PERGUNTA DE ACOMPANHAMENTO: {query}
+
+PERGUNTA REESCRITA (apenas a pergunta):"""
+
+        try:
+            if os.getenv("GROQ_API_KEY"):
+                try:
+                    out = await self._call_groq(prompt, temperature=0.1, max_tokens=60)
+                    if out: return out
+                except Exception:
+                    pass
+            if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
+                try:
+                    out = await self._call_gemini(prompt, temperature=0.1, max_tokens=60)
+                    if out: return out
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return query
+
     async def _call_groq(
         self, prompt: str, temperature: float, max_tokens: int
     ) -> str:
