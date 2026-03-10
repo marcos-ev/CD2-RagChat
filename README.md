@@ -23,24 +23,67 @@ Plataforma de RAG (Retrieval Augmented Generation) containerizada com Docker Com
 
 Este projeto demonstra uma arquitetura completa de ingestão, indexação vetorial, busca semântica e geração de respostas usando LLMs via API (Groq/Gemini).
 
-### Fluxo de Dados
+### Fluxo de Dados (Arquitetura Atual)
 
-1.  **Upload** → MinIO (armazenamento)
-2.  **Extração** → Texto do documento
-3.  **Embedding** → Vector (768 dim)
-4.  **Indexação** → PostgreSQL + pgvector
-5.  **Busca** → Similaridade vetorial
-6.  **RAG** → Contexto + LLM → Resposta
+O seguinte diagrama (feito em Mermaid) ilustra todo o caminho que um documento ou pergunta faz no nosso Ecossistema de IA N2/N3:
 
-### Componentes
+```mermaid
+flowchart TD
+    %% Entidades Externas
+    User([Usuário / Suporte N2/N3])
+    OpenWebUI([Front-end: Open WebUI])
+    
+    %% Core FastAPI
+    subgraph RAG_API [API FastAPI (Backend)]
+        Router[Router de Chat]
+        History[Gestor de Histórico]
+        Rewriter[Reescritor de Contexto]
+        SemanticSearch[Busca Semântica]
+        RoundRobin[Load Balancer de Chaves]
+    end
 
--   **FastAPI**: API REST para upload, busca e RAG
--   **PostgreSQL + pgvector**: Banco de dados vetorial para busca semântica
--   **MinIO**: Armazenamento de objetos (S3-compatible) para documentos
--   **Serviço de Ingestão**: Monitora diretório e processa arquivos automaticamente
--   **Embeddings Service**: Gera embeddings via Google Gemini Embeddings API
+    %% Storages e Bancos
+    subgraph Databases [Bancos de Dados]
+        PG[(PostgreSQL<br>Acessos e Metadados)]
+        Qdrant[(Qdrant Vector DB<br>Chunks e Embeddings)]
+        Minio[(MinIO Object Storage<br>Upload Original)]
+    end
 
-Para uma representação visual da arquitetura, consulte o diagrama: [doc/rag-plataform-diagram.png](rag-data-platform/doc/rag-plataform-diagram.png)
+    %% Provedores Externos
+    subgraph External [Provedores e APIs]
+        GeminiEMB[[Google Gemini API<br>Modelos de Embeddings]]
+        GroqLLM[[Groq Cloud LLM<br>llama-3.1-8b-instant]]
+    end
+
+    %% Fluxo de Pergunta (Chat)
+    User -->|Pergunta Dúvida| OpenWebUI
+    OpenWebUI -->|POST /chat| Router
+    Router -->|1. Valida Usuário| PG
+    Router -->|2. Identifica Histórico| History
+    History -->|3. Reescreve Pergunta Ambígua| Rewriter
+    Rewriter --> SemanticSearch
+    SemanticSearch -->|4. Converte Texto em Vetor| GeminiEMB
+    GeminiEMB -->|Devolve Vetor [1024]| SemanticSearch
+    SemanticSearch -->|5. Procura Documentos Parecidos| Qdrant
+    Qdrant -->|Devolve Top 5 Trechos| SemanticSearch
+    
+    %% Round Robin LLM
+    SemanticSearch -->|6. Junta Pergunta + Contexto| RoundRobin
+    RoundRobin -->|7. Pega a Próxima Chave (gsk_...)| GroqLLM
+    
+    %% Resposta
+    GroqLLM -->|8. IA Gera Resposta Densa| Router
+    Router -->|Visualização Final| OpenWebUI
+    OpenWebUI -->|Responde Dúvida| User
+
+    %% Fluxo de Ingestão de Documento
+    UploadDoc_N3(Dev Backend N3) -.->|POST /upload .PDF|. Minio
+    Minio -.->|Trigger Automático|. q1[Extrai Texto via Limpeza Regex]
+    q1 -.-> q2[Quebra em Chunks]
+    q2 -.->|Gera Vetor| GeminiEMB
+    q2 -.->|Salva Vetor| Qdrant
+    q2 -.->|Salva Referência Documento| PG
+```
 
 ## 🤖 O que é RAG?
 
