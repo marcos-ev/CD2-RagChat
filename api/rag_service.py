@@ -28,8 +28,21 @@ class RAGService:
         """Inicializar serviço RAG (Groq/Gemini)."""
         self.groq_model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
         self.gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-
+        
         self.client = httpx.AsyncClient(timeout=120.0)
+        self._groq_key_index = 0
+
+    def _get_groq_api_key(self) -> Optional[str]:
+        """Obtém uma chave da API Groq em sistema round-robin para contornar Rate Limit."""
+        keys_str = os.getenv("GROQ_API_KEY", "")
+        keys = [k.strip() for k in keys_str.split(",") if k.strip()]
+        if not keys:
+            return None
+        
+        # Pega a chave atual e avança o ponteiro ciclicamente
+        key = keys[self._groq_key_index % len(keys)]
+        self._groq_key_index = (self._groq_key_index + 1) % len(keys)
+        return key
 
     async def generate_response(
         self,
@@ -49,7 +62,7 @@ class RAGService:
         prompt = self._build_rag_prompt(query, context, system_instructions)
 
         # 1) Tentar Groq — com 1 retry em caso de rate limit (429)
-        if os.getenv("GROQ_API_KEY"):
+        if self._get_groq_api_key():
             for attempt in range(2):
                 try:
                     raw = await self._call_groq(prompt, temperature, max_tokens)
@@ -132,7 +145,7 @@ Título:"""
             return (title[:80].strip() or "Nova conversa")
 
         try:
-            if os.getenv("GROQ_API_KEY"):
+            if self._get_groq_api_key():
                 try:
                     out = await self._call_groq(prompt, temperature=0.3, max_tokens=30)
                     if out and len(out) < 80:
@@ -176,7 +189,7 @@ PERGUNTA DE ACOMPANHAMENTO: {query}
 PERGUNTA REESCRITA (apenas a pergunta):"""
 
         try:
-            if os.getenv("GROQ_API_KEY"):
+            if self._get_groq_api_key():
                 try:
                     out = await self._call_groq(prompt, temperature=0.1, max_tokens=60)
                     if out: return out
@@ -195,8 +208,8 @@ PERGUNTA REESCRITA (apenas a pergunta):"""
     async def _call_groq(
         self, prompt: str, temperature: float, max_tokens: int
     ) -> str:
-        """Chamar Groq API (api.groq.com)"""
-        api_key = os.getenv("GROQ_API_KEY")
+        """Chamar Groq API (api.groq.com) com a próxima chave disponível"""
+        api_key = self._get_groq_api_key()
         if not api_key:
             raise ValueError("GROQ_API_KEY não configurada")
 
@@ -260,7 +273,7 @@ PERGUNTA REESCRITA (apenas a pergunta):"""
             return f"data: {_json.dumps(chunk)}\n\n".encode()
 
         prompt = self._build_rag_prompt(query, context, system_instructions)
-        api_key = os.getenv("GROQ_API_KEY")
+        api_key = self._get_groq_api_key()
         streamed_ok = False
 
         if api_key:
@@ -377,18 +390,23 @@ PERGUNTA REESCRITA (apenas a pergunta):"""
         Returns:
             Prompt formatado
         """
-        default_instructions = """- Responda a pergunta usando APENAS as informações do contexto fornecido
-- Se a informação não estiver no contexto, responda EXATAMENTE: "Não encontrei essa informação na base de conhecimento. Tente reformular a pergunta ou consulte o responsável técnico."
-- NÃO invente, especule nem acrescente passos, URLs, nomes de times, commandos ou ambientes que não estejam explicitamente no contexto
-- Se o contexto vier de um documento T2R (Transfer to Run), mencione que as informações podem estar incompletas
-- Se houver informações conflitantes entre partes do contexto, mencione a divergência ao invés de escolher uma versão
-- Escreva uma resposta única e fluida. NÃO use cabeçalhos (#, ##) nem seções como "Resposta Direta", "Resumo" etc.
-- Use bullet points apenas quando a pergunta for sobre uma lista de itens ou passos; caso contrário, use prosa
-- Inclua código em bloco ``` apenas quando a pergunta for sobre implementação ou comandos específicos
-- NÃO cite nomes de arquivos da base (.txt, .pdf, .docx). O usuário não precisa saber a origem
-- Em respostas sobre processos/fluxos, pare no último passo confirmado pelo contexto; não adicione etapas genéricas
-- Nunca escreva "não especificado", "a definir" ou similar — se não tiver a info, omita aquele ponto
-- Use markdown inline: código em `backticks`, nomes de arquivo em _itálico_"""
+        default_instructions = """Você é um Engenheiro de Software Sênior atuando como Assistente de N2/N3 para a equipe CD2/Assaí.
+Seu objetivo é fornecer respostas técnicas diretas, precisas e arquiteturais.
+
+REGRAS DE FORMATAÇÃO E TOM (MUITO IMPORTANTE):
+- Adeque o tamanho da resposta à complexidade da pergunta: se a pergunta for ampla ("o que é o sistema X?"), dê uma EXLICAÇÃO DE ALTO NÍVEL CONCISA (máximo 2-3 parágrafos) resumindo o propósito, tecnologias principais e função no ecossistema. NÃO despeje a documentação inteira, NÃO liste todos os endpoints/jobs e NUNCA vaze e-mails, autores ou nomes de pessoas se não for expressamente perguntado.
+- Se a pergunta for complexa ou pedir detalhes específicos ("quais os fluxos?", "qual a arquitetura?"), estruture a resposta densamente.
+- Use formatação Markdown ricamente para melhorar a legibilidade para desenvolvedores: negrito para nomes de serviços/arquivos, blocos de código `inline` para variáveis, e blocos de código ``` para JSON/comandos/arquivos de configuração.
+- Use bullet points, tabelas e cabeçalhos menores (###) livremente para organizar múltiplos serviços, rotinas ou passos de um fluxo. Abandone a "prosa fluída", desenvolvedores preferem listas e diagramas estruturados.
+
+REGRAS DE CONTEÚDO E SEGURANÇA:
+- Responda APENAS usando as informações do contexto fornecido.
+- Se a informação não estiver no contexto, responda EXATAMENTE: "Não encontrei essa informação na base de conhecimento." NÃO tente adivinhar.
+- Se a pergunta for excessivamente genérica ou ambígua (ex: "me fale sobre as rotinas"), peça para o usuário especificar o nome do ecossistema, microsserviço ou rotina.
+- Múltiplos sistemas: se a pergunta envolver mais de um sistema (ex: Profimetrics e Acessaí), especifique CLARAMENTE quem faz o quê no fluxo.
+- Se houver informações conflitantes entre partes do contexto, mencione a divergência.
+- Se o contexto vier de um documento de "T2R", avise que é uma documentação de projeto/passagem e pode estar incompleta.
+- NUNCA cite os nomes de arquivo da base (ex: "Segundo o arquivo .txt...")."""
         custom_instructions = (system_instructions or "").strip()
         if custom_instructions:
             instructions = (
