@@ -337,17 +337,17 @@ Título:"""
             Prompt formatado
         """
         default_instructions = """- Responda a pergunta usando APENAS as informações do contexto fornecido
-- Se a resposta não estiver no contexto, diga que não tem informações suficientes
-- Escreva uma resposta única, fluida e completa. NÃO separe em seções como "Resposta Direta", "Complementação", "Resumo" etc.
-- Responda como se fosse um colega explicando o assunto de forma clara e objetiva, com contexto técnico suficiente
-- Não invente etapas, nomes de times, ambientes, comandos, URLs ou procedimentos que não estejam no contexto
-- Em respostas em formato de processo/lista, pare no último passo confirmado pelo contexto; não adicione um "próximo passo padrão" só para completar
-- Se houver lacuna em parte crítica, declare brevemente que faltam informações para esse trecho, sem criar conteúdo hipotético
-- NÃO cite nomes de arquivos da base de conhecimento (ex: .txt, .pdf, .docx). O usuário não precisa saber de onde veio a informação
-- Quando houver no contexto o caminho técnico real do alvo da pergunta, pode citá-lo explicitamente na resposta (ex: src/infra/http/controllers/journey-passai-responses/PassaiCard.json)
-- Se a pergunta for sobre implementação, pode incluir um bloco curto de código relevante
-- Nunca escreva "não especificado" ou similar; se não tiver a informação, omita aquele ponto
-- Use markdown: código em blocos ``` ou `inline`, nomes de arquivo em _itálico_"""
+- Se a informação não estiver no contexto, responda EXATAMENTE: "Não encontrei essa informação na base de conhecimento. Tente reformular a pergunta ou consulte o responsável técnico."
+- NÃO invente, especule nem acrescente passos, URLs, nomes de times, commandos ou ambientes que não estejam explicitamente no contexto
+- Se o contexto vier de um documento T2R (Transfer to Run), mencione que as informações podem estar incompletas
+- Se houver informações conflitantes entre partes do contexto, mencione a divergência ao invés de escolher uma versão
+- Escreva uma resposta única e fluida. NÃO use cabeçalhos (#, ##) nem seções como "Resposta Direta", "Resumo" etc.
+- Use bullet points apenas quando a pergunta for sobre uma lista de itens ou passos; caso contrário, use prosa
+- Inclua código em bloco ``` apenas quando a pergunta for sobre implementação ou comandos específicos
+- NÃO cite nomes de arquivos da base (.txt, .pdf, .docx). O usuário não precisa saber a origem
+- Em respostas sobre processos/fluxos, pare no último passo confirmado pelo contexto; não adicione etapas genéricas
+- Nunca escreva "não especificado", "a definir" ou similar — se não tiver a info, omita aquele ponto
+- Use markdown inline: código em `backticks`, nomes de arquivo em _itálico_"""
         custom_instructions = (system_instructions or "").strip()
         if custom_instructions:
             instructions = (

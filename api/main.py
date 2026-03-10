@@ -110,7 +110,7 @@ class OpenAIChatMessage(BaseModel):
 class OpenAIChatCompletionRequest(BaseModel):
     model: Optional[str] = None
     messages: List[OpenAIChatMessage]
-    temperature: float = 0.7
+    temperature: float = 0.4
     max_tokens: int = 512
     stream: bool = False
 
@@ -800,10 +800,10 @@ async def openai_chat_completions(
         embeddings_service=app.state.embeddings_service,
         qdrant_service=app.state.qdrant_service,
         query=query,
-        limit=3,
-        threshold=0.3,
+        limit=5,
+        threshold=0.25,
     )
-    context_parts = [_redact_secrets(doc.content or "") for doc, _ in ordered_docs[:3]]
+    context_parts = [_redact_secrets(doc.content or "") for doc, _ in ordered_docs[:5]]
     context = "\n\n---\n\n".join(context_parts)
     system_instructions = get_app_setting(db, "rag_instructions", "").strip() or None
 
@@ -816,7 +816,7 @@ async def openai_chat_completions(
             async for chunk in app.state.rag_service.generate_response_stream(
                 query=query,
                 context=context,
-                temperature=body.temperature,
+                temperature=min(body.temperature, 0.4),
                 max_tokens=body.max_tokens,
                 system_instructions=system_instructions,
                 completion_id=completion_id,
@@ -839,8 +839,8 @@ async def openai_chat_completions(
         app.state.qdrant_service,
         db,
         query=query,
-        limit=3,
-        temperature=body.temperature,
+        limit=5,
+        temperature=min(body.temperature, 0.4),
     )
     return {
         "id": completion_id,
