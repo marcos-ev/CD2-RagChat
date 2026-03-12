@@ -1,488 +1,209 @@
 # RAG Data Platform
 
-Plataforma de RAG (Retrieval Augmented Generation) containerizada com Docker Compose. Arquitetura completa: ingestão, indexação vetorial (PostgreSQL + pgvector), busca semântica e geração de respostas com LLMs via API (Groq/Gemini).
+Plataforma de RAG containerizada com Docker Compose para suporte N2/N3. Este README descreve o estado real do runtime atual.
 
 ## 📋 Índice
 
-- [Arquitetura](#arquitetura)
-- [O que é RAG?](#o-que-é-rag)
-- [O que são Embeddings?](#o-que-são-embeddings)
-- [Stack Tecnológica](#stack-tecnológica)
-- [Estrutura do Projeto](#estrutura-do-projeto)
-- [Como Executar](#como-executar)
-- [Testando a API](#testando-a-api)
-- [Exemplos de Uso](#exemplos-de-uso)
-- [Interfaces](#interfaces)
-- [Escalabilidade](#escalabilidade)
-- [Configurações Avançadas](#configurações-avançadas)
-- [Troubleshooting](#troubleshooting)
-- [Licença e Contribuições](#licença-e-contribuições)
-- [Contato](#contato)
+- [TL;DR](#-tldr)
+- [Quickstart (5 minutos)](#-quickstart-5-minutos)
+- [Arquitetura Atual](#️-arquitetura-atual)
+- [Tabela de Verdade (Ativo x Legado x Futuro)](#-tabela-de-verdade-ativo-x-legado-x-futuro)
+- [Implantação Recomendada (Fases)](#️-implantação-recomendada-fases)
+- [Estrutura do Projeto](#-estrutura-do-projeto-foco-operacional)
+- [Endpoints Principais](#-endpoints-principais)
+- [Variáveis de Ambiente Essenciais](#️-variáveis-de-ambiente-essenciais)
+- [Ingestão Confluence (Incremental)](#-ingestão-confluence-incremental)
+- [Troubleshooting Rápido](#-troubleshooting-rápido)
+- [Documentação Complementar](#-documentação-complementar)
+- [Licença e Contribuições](#-licença-e-contribuições)
 
-## 🏗️ Arquitetura
+## TL;DR
 
-Este projeto demonstra uma arquitetura completa de ingestão, indexação vetorial, busca semântica e geração de respostas usando LLMs via API (Groq/Gemini).
+- API principal em `FastAPI`, banco relacional em `PostgreSQL` e banco vetorial em `Qdrant`.
+- Embeddings são gerados localmente no container `fastapi` via `sentence-transformers` (modelo padrão `BAAI/bge-m3`).
+- Respostas são geradas por cascata de LLM: `Groq` (prioridade) → `Gemini` (fallback, se `GOOGLE_API_KEY` ou `GEMINI_API_KEY` configurada).
+- Frontend de chat: `Open WebUI` consumindo endpoint compatível OpenAI (`/v1/chat/completions`).
+- Autenticação via Google OAuth com controle de domínio (`DOMAIN_ALLOWED`), papéis de admin e publicador.
 
-### Fluxo de Dados (Arquitetura Atual)
-
-O seguinte diagrama (feito em Mermaid) ilustra todo o caminho que um documento ou pergunta faz no nosso Ecossistema de IA N2/N3:
-
-```mermaid
-flowchart TD
-    %% Entidades Externas
-    User([Usuário / Suporte N2/N3])
-    OpenWebUI([Front-end: Open WebUI])
-    
-    %% Core FastAPI
-    subgraph RAG_API [API FastAPI (Backend)]
-        Router[Router de Chat]
-        History[Gestor de Histórico]
-        Rewriter[Reescritor de Contexto]
-        SemanticSearch[Busca Semântica]
-        RoundRobin[Load Balancer de Chaves]
-    end
-
-    %% Storages e Bancos
-    subgraph Databases [Bancos de Dados]
-        PG[(PostgreSQL<br>Acessos e Metadados)]
-        Qdrant[(Qdrant Vector DB<br>Chunks e Embeddings)]
-        Minio[(MinIO Object Storage<br>Upload Original)]
-    end
-
-    %% Provedores Externos
-    subgraph External [Provedores e APIs]
-        GeminiEMB[[Google Gemini API<br>Modelos de Embeddings]]
-        GroqLLM[[Groq Cloud LLM<br>llama-3.1-8b-instant]]
-    end
-
-    %% Fluxo de Pergunta (Chat)
-    User -->|Pergunta Dúvida| OpenWebUI
-    OpenWebUI -->|POST /chat| Router
-    Router -->|1. Valida Usuário| PG
-    Router -->|2. Identifica Histórico| History
-    History -->|3. Reescreve Pergunta Ambígua| Rewriter
-    Rewriter --> SemanticSearch
-    SemanticSearch -->|4. Converte Texto em Vetor| GeminiEMB
-    GeminiEMB -->|Devolve Vetor [1024]| SemanticSearch
-    SemanticSearch -->|5. Procura Documentos Parecidos| Qdrant
-    Qdrant -->|Devolve Top 5 Trechos| SemanticSearch
-    
-    %% Round Robin LLM
-    SemanticSearch -->|6. Junta Pergunta + Contexto| RoundRobin
-    RoundRobin -->|7. Pega a Próxima Chave (gsk_...)| GroqLLM
-    
-    %% Resposta
-    GroqLLM -->|8. IA Gera Resposta Densa| Router
-    Router -->|Visualização Final| OpenWebUI
-    OpenWebUI -->|Responde Dúvida| User
-
-    %% Fluxo de Ingestão de Documento
-    UploadDoc_N3(Dev Backend N3) -.->|POST /upload .PDF|. Minio
-    Minio -.->|Trigger Automático|. q1[Extrai Texto via Limpeza Regex]
-    q1 -.-> q2[Quebra em Chunks]
-    q2 -.->|Gera Vetor| GeminiEMB
-    q2 -.->|Salva Vetor| Qdrant
-    q2 -.->|Salva Referência Documento| PG
-```
-
-## 🤖 O que é RAG?
-
-**RAG (Retrieval Augmented Generation)** é uma técnica que combina busca de informações com geração de texto usando LLMs.
-
-### Como Funciona:
-
-1.  **Retrieval (Busca)**: Quando o usuário faz uma pergunta, o sistema busca documentos relevantes usando busca semântica (similaridade de embeddings)
-2.  **Augmentation (Aumento)**: Os documentos encontrados são usados como contexto
-3.  **Generation (Geração)**: O LLM recebe a pergunta + contexto e gera uma resposta baseada nas informações encontradas
-
-### Vantagens:
-
--   ✅ Respostas baseadas em documentos específicos (não apenas conhecimento do modelo)
--   ✅ Reduz alucinações (o modelo tem contexto real)
--   ✅ Permite atualizar conhecimento sem retreinar o modelo
--   ✅ Rastreabilidade (sabe de onde veio a informação)
-
-## 🔢 O que são Embeddings?
-
-**Embeddings** são representações numéricas (vetores) de texto que capturam significado semântico.
-
-### Características:
-
--   Textos similares em significado têm embeddings próximos no espaço vetorial
--   Permitem busca por significado, não apenas palavras-chave
--   Dimensão típica: 384, 768, 1536 (dependendo do modelo)
-
-### Exemplo:
-
-```
-"O que é machine learning?" → [0.23, -0.45, 0.67, ...] (384 números)
-"O que é aprendizado de máquina?" → [0.25, -0.43, 0.65, ...] (muito similar!)
-"Qual é a receita do bolo?" → [0.12, 0.89, -0.34, ...] (muito diferente!)
-```
-
-### Busca Vetorial:
-
-Usando **similaridade de cosseno**, encontramos documentos com embeddings mais próximos à query:
-
-```
-similaridade = cos(θ) = (A · B) / (||A|| × ||B||)
-```
-
-## 🛠️ Stack Tecnológica
-
-| Componente     | Tecnologia          | Versão      | Propósito                           |
-| :------------- | :------------------ | :---------- | :---------------------------------- |
-| API            | FastAPI             | 0.104+      | API REST assíncrona                 |
-| Banco          | PostgreSQL          | 16          | Banco relacional                    |
-| Vetores        | pgvector            | latest      | Extensão para busca vetorial        |
-| Storage        | MinIO               | latest      | Armazenamento S3-compatible         |
-| LLM            | Groq / Gemini       | API externa | Geração de respostas via provedores |
-| Embeddings     | Gemini Embeddings API | google-genai | Modelo gemini-embedding-001         |
-| Ingestão       | Python + watchdog   | 3.11        | Monitoramento de arquivos           |
-
-## 📁 Estrutura do Projeto
-
-```
-./
-├── api/                    # API FastAPI (upload, busca, RAG)
-│   ├── main.py
-│   ├── database.py
-│   ├── minio_client.py
-│   ├── embeddings_service.py
-│   ├── rag_service.py
-│   ├── document_service.py
-│   ├── requirements.txt
-│   └── Dockerfile
-│
-├── ingestion/              # Serviço de ingestão (watch de diretório)
-│   ├── ingestion_service.py
-│   ├── requirements.txt
-│   └── Dockerfile
-│
-├── docker/
-│   └── postgres/
-│       └── init.sql        # Script de inicialização do banco
-│
-├── data/                   # Diretório monitorado para novos documentos
-│   └── .gitkeep
-│
-├── scripts/                # Scripts auxiliares
-│   ├── criar_link_docker.ps1
-│   ├── fix_docker_wsl.ps1
-│   ├── reinstalar_docker.ps1
-│   ├── restaurar_docker.ps1
-│   ├── setup_ollama.sh*    # Script legado (não utilizado no fluxo atual)
-│   ├── subir_e_validar.ps1
-│   └── test_api.sh*
-│
-├── docs/                   # Documentação adicional
-│   ├── ESCALABILIDADE_E_PRODUCAO.md
-│   ├── OAUTH_REDIRECT_URI.md
-│   └── (outros documentos técnicos)
-│
-├── embeddings/             # Módulo de embeddings (referência)
-│   └── __init__.py
-│
-├── rag-data-platform/      # Código-fonte original (referência)
-│                           # (Detalhes da estrutura interna em rag-data-platform/README.md)
-│
-├── docker-compose.yml
-├── .env.example
-├── README.md               # Este arquivo
-└── requirements.txt        # Dependências principais do projeto
-```
-
-## 🚀 Como Executar
+## 🚀 Quickstart (5 minutos)
 
 ### Pré-requisitos
 
--   Docker Desktop (ou Docker + Docker Compose)
--   Portas disponíveis: 8000, 5432, 9000, 9001
+- Docker Desktop
+- Portas livres: `3000`, `5432`, `6333`, `6334`, `8000`
 
-### Passo 1: Configurar variáveis de ambiente (opcional)
+### Subir ambiente
 
 ```bash
 cp .env.example .env
-# Edite .env se precisar alterar credenciais (padrões já funcionam)
-```
-
-### Passo 2: Iniciar os Serviços
-
-Na **raiz do projeto**:
-
-```bash
+# edite .env com suas chaves antes de subir
 docker compose up -d
 ```
 
-Este comando irá:
--   ✅ Baixar todas as imagens necessárias
--   ✅ Criar volumes persistentes
--   ✅ Inicializar PostgreSQL com pgvector
--   ✅ Configurar MinIO
--   ✅ Subir API FastAPI
--   ✅ Iniciar serviço de ingestão
-
-### Passo 3: Aguardar Inicialização
-
-Aguarde alguns minutos para:
--   PostgreSQL inicializar
--   API carregar o modelo de embeddings
-
-### Passo 4: Verificar Saúde dos Serviços
-
-```bash
-# Health check da API
-curl http://localhost:8000/health
-
-# Verificar logs
-docker compose logs -f api
-```
-
-## 🧪 Testando a API
-
-### 1. Health Check
+### Verificar saúde
 
 ```bash
 curl http://localhost:8000/health
+docker compose logs -f fastapi
 ```
 
-**Resposta esperada:**
+### Acessos
 
-```json
-{
-  "status": "ok",
-  "database": "healthy",
-  "services": {
-    "embeddings": "ready",
-    "rag": "ready"
-  }
-}
+- API docs: `http://localhost:8000/docs`
+- Open WebUI: `http://localhost:3000`
+
+## 🏗️ Arquitetura Atual
+
+```mermaid
+flowchart TD
+    User[Usuario] --> OpenWebUI[OpenWebUI]
+    OpenWebUI -->|POST /v1/chat/completions| FastAPI[FastAPI]
+    FastAPI --> Postgres[(PostgreSQL)]
+    FastAPI --> Qdrant[(Qdrant)]
+    FastAPI -->|Embeddings locais| ST[sentence-transformers]
+    FastAPI -->|LLM primario| Groq[Groq API]
+    FastAPI -->|Fallback LLM| Gemini[Gemini API]
 ```
 
-### 2. Upload de Documento
+## 🧭 Tabela de Verdade (Ativo x Legado x Futuro)
+
+| Componente | Estado | Implementação atual |
+| :-- | :-- | :-- |
+| API backend | Ativo | `fastapi` em `docker-compose.yml` |
+| Banco relacional | Ativo | `postgres` (`pgvector/pgvector:pg16`) |
+| Banco vetorial | Ativo | `qdrant` + `api/qdrant_service.py` |
+| Embeddings | Ativo | `sentence-transformers` local (`api/embeddings_service.py`) |
+| LLM | Ativo | Groq com fallback Gemini (`api/rag_service.py`) |
+| Auth Google OAuth | Ativo | `api/auth.py` com controle de domínio e papéis |
+| Open WebUI | Ativo | serviço `open-webui` no compose |
+| Confluence incremental | Ativo | webhook + sync admin + scripts de ingestão na raiz |
+| MinIO | Legado neste runtime | mencionado em docs antigos, não sobe no compose raiz |
+| Worker `ingestion` dedicado | Legado no compose raiz | código existe em `ingestion/`, mas não está no compose atual |
+| Ollama fallback | Futuro/roadmap | detalhado em docs de escalabilidade |
+
+## 🛠️ Stack Tecnológica (runtime atual)
+
+| Camada | Tecnologia | Observação |
+| :-- | :-- | :-- |
+| API | FastAPI | Endpoints REST e compatibilidade OpenAI |
+| Dados relacionais | PostgreSQL | Metadados, usuários, conversas |
+| Vetorial | Qdrant | Busca semântica por similaridade |
+| Embeddings | sentence-transformers | Modelo default `BAAI/bge-m3` |
+| Geração | Groq + Gemini | Cascata com fallback |
+| Auth | Google OAuth 2.0 | Controle por domínio e papéis (admin/publicador) |
+| UI | Open WebUI | Consumindo `/v1/*` da API |
+
+## 🧱 Implantação Recomendada (Fases)
+
+Para reduzir risco operacional e evitar duplicidade de dados:
+
+1. **Fase A — Dedupe local primeiro**
+   - estabilizar `/admin/sync` e `/internal/sync` com idempotência por origem;
+   - garantir que arquivo repetido com mesmo conteúdo seja `skip`.
+2. **Fase B — Confluence incremental**
+   - ativar webhook + sync incremental com watermark;
+   - reprocessar somente conteúdo alterado.
+3. **Fase C — Hardening**
+   - lock por origem, retries idempotentes, auditoria e monitoramento.
+
+## 📁 Estrutura do Projeto (foco operacional)
+
+```text
+./
+├── api/                        # Backend FastAPI (main.py, services, auth)
+├── docker/postgres/            # init.sql do banco
+├── docs/                       # documentação técnica complementar
+├── data/                       # arquivos de entrada e storage local
+├── scripts/                    # scripts utilitários
+├── embeddings/                 # artefatos de embeddings
+├── static/                     # assets estáticos da API
+├── ingestion/                  # worker de ingestão (legado no compose raiz)
+├── confluence_ingestion.py     # ingestão manual Confluence (execução direta)
+├── confluence_initial_sync.py  # sincronização inicial completa
+├── confluence_webhook.py       # handler webhook standalone
+├── docker-compose.yml          # stack atual de runtime
+├── .env.example                # variáveis de referência
+└── rag-data-platform/          # base de referência/legado
+```
+
+## 🔌 Endpoints Principais
+
+### Health
 
 ```bash
-# Criar arquivo de teste
-echo "Machine Learning é uma área da inteligência artificial que permite aos computadores aprenderem com dados sem serem explicitamente programados. Existem três tipos principais: aprendizado supervisionado, não supervisionado e por reforço." > documento.txt
+curl http://localhost:8000/health
+```
 
-# Upload
+### Upload de documento
+
+```bash
 curl -X POST "http://localhost:8000/upload" \
+  -H "Authorization: Bearer <token>" \
   -F "file=@documento.txt"
 ```
 
-**Resposta esperada:**
-
-```json
-{
-  "message": "Documento processado com sucesso",
-  "document_id": 1,
-  "filename": "documento.txt",
-  "file_path": "uuid-xxxxx.txt",
-  "content_length": 245
-}
-```
-
-### 3. Busca Semântica
+### Busca semântica
 
 ```bash
 curl -X POST "http://localhost:8000/search" \
   -H "Content-Type: application/json" \
-  -d '{
-    "query": "O que é aprendizado de máquina?",
-    "limit": 5,
-    "threshold": 0.7
-  }'
+  -d '{"query":"o que e fastapi","limit":5,"threshold":0.3}'
 ```
 
-**Resposta esperada:**
-
-```json
-[
-  {
-    "id": 1,
-    "filename": "documento.txt",
-    "content": "Machine Learning é uma área...",
-    "similarity": 0.92,
-    "metadata": {
-      "file_size": 245,
-      "file_type": ".txt"
-    }
-  }
-]
-```
-
-### 4. RAG (Pergunta com Resposta Gerada)
+### Resposta RAG
 
 ```bash
 curl -X POST "http://localhost:8000/rag" \
   -H "Content-Type: application/json" \
-  -d '{
-    "query": "Quais são os tipos de machine learning?",
-    "limit": 3,
-    "temperature": 0.7
-  }'
+  -d '{"query":"resuma este projeto","limit":3,"temperature":0.4}'
 ```
 
-**Resposta esperada:**
-
-```json
-{
-  "answer": "Baseado no contexto fornecido, existem três tipos principais de machine learning: aprendizado supervisionado, não supervisionado e por reforço...",
-  "sources": [
-    {
-      "id": 1,
-      "filename": "documento.txt",
-      "content": "Machine Learning é uma área...",
-      "similarity": 0.95
-    }
-  ],
-  "query": "Quais são os tipos de machine learning?"
-}
-```
-
-### 5. Listar Documentos
+### Chat com histórico
 
 ```bash
-curl http://localhost:8000/documents
-```
-
-## 📚 Exemplos de Uso
-
-### Exemplo Completo: Pipeline RAG
-
-```bash
-# 1. Criar múltiplos documentos
-cat > doc1.txt << EOF
-Python é uma linguagem de programação de alto nível, interpretada e de propósito geral.
-Foi criada por Guido van Rossum e lançada em 1991.
-Python é conhecida por sua sintaxe simples e legibilidade.
-EOF
-
-cat > doc2.txt << EOF
-FastAPI é um framework web moderno e rápido para Python.
-É baseado em type hints e suporta async/await nativamente.
-FastAPI é uma das frameworks mais rápidas disponíveis.
-EOF
-
-# 2. Upload dos documentos
-curl -X POST "http://localhost:8000/upload" -F "file=@doc1.txt"
-curl -X POST "http://localhost:8000/upload" -F "file=@doc2.txt"
-
-# 3. Buscar informações sobre Python
-curl -X POST "http://localhost:8000/search" \
+curl -X POST "http://localhost:8000/chat" \
   -H "Content-Type: application/json" \
-  -d '{"query": "Quem criou Python?", "limit": 3}'
-
-# 4. Fazer pergunta usando RAG
-curl -X POST "http://localhost:8000/rag" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "Me explique o que é FastAPI e suas características principais",
-    "limit": 2
-  }'
+  -d '{"message":"Oi","conversation_id":null}'
 ```
 
-### Usando o Serviço de Ingestão
-
-O serviço de ingestão monitora o diretório `/data` (mapeado para `./data` localmente):
+### Compatibilidade OpenAI (Open WebUI)
 
 ```bash
-# Copiar arquivo para o diretório monitorado
-cp documento.txt ./data/
-
-# O serviço detectará automaticamente e processará o arquivo
-# Ver logs:
-docker compose logs -f ingestion
+curl -X POST "http://localhost:8000/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"llama-3.1-8b-instant","messages":[{"role":"user","content":"Oi"}],"stream":false}'
 ```
 
-## Interfaces
+### Gestão de conversas
 
--   **API Swagger**: http://localhost:8000/docs
--   **Open WebUI**: http://localhost:3000
--   **MinIO Console**: http://localhost:9001 (usuário: minioadmin, senha: minioadmin)
-
-## 📈 Escalabilidade
-
-### Horizontal Scaling
-
-#### 1. API FastAPI
-
-```yaml
-# docker-compose.yml
-api:
-  deploy:
-    replicas: 3
-  # Adicionar load balancer (nginx/traefik)
+```bash
+GET  /conversations          # listar conversas do usuário
+GET  /conversations/{id}     # detalhe de conversa
+POST /conversations          # criar conversa
+PATCH /conversations/{id}    # renomear conversa
+DELETE /conversations/{id}   # excluir conversa
 ```
 
-#### 2. PostgreSQL
+### Documentos (admin)
 
--   **Read Replicas**: Para distribuir leituras
--   **Connection Pooling**: PgBouncer ou pgpool
--   **Sharding**: Particionar por tenant/categoria
-
-#### 3. MinIO
-
--   **Distributed Mode**: Múltiplos nós para alta disponibilidade
--   **CDN**: CloudFront/Cloudflare para distribuição
-
-#### 4. Provedor de LLM (Groq/Gemini)
-
--   **Múltiplas Chaves Groq (Round Robin)**: O RAG agora suporta nativamente o uso de múltiplas contas do Groq no plano **Free**. Basta separar as chaves por vírgula na variável de ambiente. A API irá circular entre elas (load balancing local), driblando Erros 429 de Rate Limit (TPM).
--   **Failover por provedor**: Definir estratégia de fallback estrutural entre Groq primário e Gemini secundário.
--   **Controle de custos**: Ajustar o modelo/temperatura por tipo de requisição (uso de llama-3.1-8b).
-
-### Otimizações
-
-#### 1. Embeddings
-
-```python
-# Usar modelos mais eficientes
-# - gemini-embedding-001 (768 dim) - atual
-# - text-embedding-004 (768 dim) - alternativa
-# - modelos locais com 1024+ dim (avaliar custo x qualidade)
+```bash
+GET    /documents              # listar documentos indexados
+DELETE /documents/{id}         # remover documento e seus chunks
 ```
 
-#### 2. Busca Vetorial
+### Administração
 
-```sql
--- Ajustar parâmetros HNSW
-CREATE INDEX documents_embedding_idx ON documents
-USING hnsw (embedding vector_cosine_ops)
-WITH (m = 16, ef_construction = 64);
+```bash
+GET   /admin/settings          # configurações do sistema
+PATCH /admin/settings          # atualizar configurações
+GET   /admin/users             # listar usuários
+POST  /admin/sync              # sync filesystem manual
+POST  /admin/confluence/sync   # sync Confluence manual
 ```
 
-#### 3. Cache
+## ⚙️ Variáveis de Ambiente Essenciais
 
--   **Redis**: Cache de embeddings e respostas RAG
--   **CDN**: Para documentos estáticos
-
-#### 4. Processamento Assíncrono
-
--   **Celery/RQ**: Processar embeddings em background
--   **Kafka/RabbitMQ**: Fila de ingestão
-
-### Arquitetura Escalada
-
-```mermaid
-graph TD
-    LB[Load Balancer] --> API1(API 1)
-    LB --> API2(API 2)
-    LB --> API3(API 3)
-
-    API1 --> PG_Master(PG Master)
-    API2 --> PG_Master
-    API3 --> PG_Master
-
-    PG_Master --> PG_Replica1(PG Replica)
-    PG_Master --> PG_Replica2(PG Replica)
-```
-
-## 🔧 Configurações Avançadas
-
-### Variáveis de Ambiente
-
-Crie um arquivo `.env` na raiz:
+Use `.env` a partir de `.env.example`. Abaixo as variáveis consumidas no runtime atual:
 
 ```env
 # PostgreSQL
@@ -490,27 +211,129 @@ POSTGRES_USER=raguser
 POSTGRES_PASSWORD=ragpass
 POSTGRES_DB=ragdb
 
-# MinIO
-MINIO_ROOT_USER=minioadmin
-MINIO_ROOT_PASSWORD=minioadmin
-MINIO_BUCKET=documents
-
-# LLM Providers (Groq Cloud / Gemini)
-# Você pode utilizar múltiplas chaves gratuitas separadas por vírgula para ativar o algoritmo Round-Robin e escalar horizontalmente os limites de TPM.
-GROQ_API_KEY=gsk_chave1,gsk_chave2,gsk_chave3
-GOOGLE_API_KEY=
-
-# Embeddings
+# LLM — Cascata Groq → Gemini
+GROQ_API_KEY=gsk_chave1,gsk_chave2   # múltiplas chaves separadas por vírgula
+GOOGLE_API_KEY=                        # habilita fallback Gemini (ou use GEMINI_API_KEY)
 GEMINI_API_KEY=
-EMBEDDINGS_MODEL=gemini-embedding-001
-EMBEDDING_DIM_FALLBACK=768
+GROQ_MODEL=llama-3.1-8b-instant
+GEMINI_MODEL=gemini-1.5-flash
+
+# Embeddings locais (sentence-transformers)
+EMBEDDINGS_MODEL=BAAI/bge-m3
+EMBEDDING_DIM_FALLBACK=1024
+
+# Chunking
+CHUNK_SIZE=512
+CHUNK_OVERLAP=50
+
+# Qdrant
+QDRANT_COLLECTION=documents
+
+# Auth Google OAuth
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+SESSION_SECRET=change-me
+APP_URL=http://localhost:8000
+DOMAIN_ALLOWED=cd2.com.br              # domínio permitido para login
+ADMIN_EMAILS=                          # e-mails com papel admin (separados por vírgula)
+PUBLICADOR_EMAILS=                     # e-mails com papel publicador
+
+# Acesso anônimo (somente desenvolvimento)
+ALLOW_ANONYMOUS_CHAT=false
+
+# Ingestão via API interna
+INGEST_API_KEY=                        # chave para endpoint /internal/upload
+
+# Open WebUI
+WEBUI_SECRET_KEY=change-me
+OPENAI_API_KEY=dummy                   # qualquer valor não vazio; a autenticação real é da API
+
+# Confluence (opcional)
+CONFLUENCE_URL=
+CONFLUENCE_EMAIL=
+CONFLUENCE_TOKEN=
+CONFLUENCE_SPACES=
+CONFLUENCE_WEBHOOK_SECRET=
+CONFLUENCE_TIMEOUT_SECONDS=45
 ```
 
-## 🐛 Troubleshooting
+## 🔁 Ingestão Confluence (Incremental)
 
-### Problema: Mudança de dimensão dos embeddings (1024 -> 768)
+### Endpoints
 
-Ao migrar para `gemini-embedding-001`, recrie a collection no Qdrant se ela foi criada com 1024 dimensões.
+- Webhook: `POST /internal/confluence/webhook`
+- Sync manual (admin): `POST /admin/confluence/sync`
+
+### Scripts de ingestão direta (fora do compose)
+
+Para execução pontual sem depender do endpoint HTTP:
+
+```bash
+python confluence_ingestion.py          # ingestão incremental
+python confluence_initial_sync.py       # sincronização inicial completa
+```
+
+### Modelo de idempotência e watermark
+
+O runtime atual usa estado por origem para evitar reprocessamento desnecessário:
+
+- `source_type` (`filesystem`, `confluence`)
+- `source_key` (Confluence: `page_id`; filesystem: caminho relativo canônico)
+- `content_hash` (`sha256` do conteúdo normalizado)
+- `last_modified_at` (timestamp da origem)
+- `last_ingested_at` (timestamp local após sucesso)
+- `status` (`pending`, `processing`, `done`, `failed`)
+
+Regras:
+- hash igual → `skip`
+- hash diferente → `replace` controlado de chunks/vetores da origem
+- sync incremental usa watermark de `last_modified_at` com janela de segurança
+
+> Segurança: trate `CONFLUENCE_TOKEN` como segredo crítico. Se vazar, revogue e gere novo token antes de usar.
+
+### Fluxo resumido
+
+```mermaid
+flowchart TD
+    ConfluenceCloud[ConfluenceCloud] --> WebhookEndpoint[WebhookEndpoint]
+    AdminSync[AdminSync] --> ConfluenceCloud
+    WebhookEndpoint --> ConfluenceService[ConfluenceService]
+    ConfluenceService --> Fingerprint[content_hash+source_key]
+    Fingerprint --> Decision{"hash changed?"}
+    Decision -->|no| Skip[Skip]
+    Decision -->|yes| DocumentService[DocumentService]
+    DocumentService --> Postgres[(PostgreSQL)]
+    DocumentService --> Qdrant[(Qdrant)]
+```
+
+### Configuração de webhook (Cloud)
+
+1. Confluence → Settings → System → Webhooks
+2. URL: `https://seu-dominio.com/internal/confluence/webhook`
+3. Eventos: page created, updated, removed
+4. Secret: mesmo valor de `CONFLUENCE_WEBHOOK_SECRET`
+
+### Runbook rápido (Confluence)
+
+```bash
+# 1) Subir stack
+docker compose up -d
+
+# 2) Verificar saúde
+curl http://localhost:8000/health
+
+# 3) Rodar sync incremental inicial (24h)
+curl -X POST "http://localhost:8000/admin/confluence/sync" \
+  -H "Content-Type: application/json" \
+  -d '{"since_minutes":1440}'
+
+# 4) Ver logs
+docker compose logs -f fastapi
+```
+
+## 🐛 Troubleshooting Rápido
+
+### Embedding dimension mismatch no Qdrant
 
 ```bash
 docker compose stop fastapi
@@ -518,45 +341,33 @@ curl -X DELETE http://localhost:6333/collections/documents
 docker compose up -d fastapi
 ```
 
-### Problema: Erro de provedor LLM (Groq/Gemini)
+### Erro de provedor LLM
 
 ```bash
-# Ver logs da API para detalhes do erro de integração
-docker compose logs -f api
+docker compose logs -f fastapi
 ```
 
-Verifique se:
-- `GROQ_API_KEY` e/ou `GOOGLE_API_KEY` estão definidos no ambiente
-- a API externa está acessível na rede atual
-- limites de uso/cota da chave não foram excedidos
+Verifique se `GROQ_API_KEY` está correta. Para habilitar fallback Gemini, configure `GOOGLE_API_KEY` ou `GEMINI_API_KEY`.
 
-### Problema: Erro de conexão com PostgreSQL
+### `redirect_uri_mismatch` no login Google
 
-```bash
-# Verificar se o banco está rodando
-docker compose ps postgres
+Confira as URIs autorizadas e o `APP_URL` em:
 
-# Ver logs
-docker compose logs postgres
+- `docs/OAUTH_REDIRECT_URI.md`
 
-# Conectar manualmente
-docker exec -it rag-postgres psql -U raguser -d ragdb
-```
+## 📚 Documentação Complementar
 
-### Problema: MinIO não acessível
+- OAuth e redirect URI: `docs/OAUTH_REDIRECT_URI.md`
+- Personalização visual Open WebUI: `docs/PERSONALIZACAO_VISUAL_OPENWEBUI.md`
+- Escalabilidade e produção (roadmap/futuro): `docs/ESCALABILIDADE_E_PRODUCAO.md`
+- Referência histórica da base original: `rag-data-platform/README.md`
 
-```bash
-# Verificar bucket
-docker exec rag-minio mc ls minio/
-
-# Criar bucket manualmente
-docker exec rag-minio mc mb minio/documents
-```
+> Este `README.md` é o manual mestre do projeto. Use os demais docs apenas como aprofundamento temático.
 
 ## 📝 Licença e Contribuições
 
 Este projeto é um exemplo educacional. Sinta-se livre para usar e modificar.
-Contribuições são bem-vindas! Sinta-se livre para abrir issues e pull requests.
+Contribuições são bem-vindas via issues e pull requests.
 
 ## 📧 Contato
 
@@ -564,4 +375,4 @@ Para dúvidas ou sugestões, abra uma issue no repositório.
 
 ---
 
-**Desenvolvido com ❤️ para demonstrar arquitetura RAG completa e containerizada**
+**Desenvolvido por Marcos Eduardo**
